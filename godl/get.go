@@ -48,16 +48,18 @@ func Download(importPath, repoPath, target, rev string) (*VCS, error) {
 	if err = os.MkdirAll(parent, 0777); err != nil {
 		return nil, err
 	}
-	if rev == "" {
-		if err = rr.vcs.create(root, rr.repo); err != nil {
-			return nil, err
-		}
-	} else {
-		if err = rr.vcs.createRev(root, rr.repo, rev); err != nil {
-			return nil, err
+	cmds := rr.vcs.createCmd
+	if rev != "" {
+		if rr.vcs.isRefRev(root, rr.repo, rev) {
+			cmds = rr.vcs.createWithRefCmd
+		} else {
+			cmds = rr.vcs.createWithRevCmd
 		}
 	}
-	return &VCS{Root: root, ImportPath: rr.root, Type: rr.vcs.cmd}, nil
+	if err = rr.vcs.create(root, rr.repo, rev, cmds); err != nil {
+		return nil, err
+	}
+	return &VCS{Root: root, ImportPath: importPath, Type: rr.vcs.cmd}, nil
 }
 
 // goTag matches go release tags such as go1 and go1.2.3.

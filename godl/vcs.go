@@ -53,8 +53,10 @@ type vcsCmd struct {
 	name string
 	cmd  string // name of binary to invoke command
 
-	createCmd    []string // commands to download a fresh copy of a repository
-	createRevCmd []string // commands to download specified revision of a repository
+	isRefRevCmd      string   // command to tell whether rev is a named reference or just a commit ID
+	createCmd        []string // commands to download a fresh copy of a repository
+	createWithRefCmd []string // commands to download specified revision of a repository
+	createWithRevCmd []string // commands to download specified revision of a repository
 
 	scheme  []string
 	pingCmd string
@@ -104,8 +106,8 @@ var vcsHg = &vcsCmd{
 	name: "Mercurial",
 	cmd:  "hg",
 
-	createCmd:    []string{"clone -U {repo} {dir}"},
-	createRevCmd: []string{"clone --updaterev {rev} {repo} {dir}"},
+	createCmd:        []string{"clone -U {repo} {dir}"},
+	createWithRevCmd: []string{"clone --updaterev {rev} {repo} {dir}"},
 
 	scheme:     []string{"https", "http", "ssh"},
 	pingCmd:    "identify {scheme}://{repo}",
@@ -125,8 +127,10 @@ var vcsGit = &vcsCmd{
 	name: "Git",
 	cmd:  "git",
 
-	createCmd:    []string{"clone {repo} {dir}", "-C {dir} submodule update --init --recursive"},
-	createRevCmd: []string{"clone {repo} {dir}", "-C {dir} submodule update --init --recursive", "-C {dir} checkout {rev}", "-C {dir} reset --hard {rev}"},
+	isRefRevCmd:      "ls-remote --exit-code {repo} {rev}",
+	createCmd:        []string{"clone {repo} {dir} --single-branch --depth 1 --shallow-submodules", "-C {dir} submodule update --init --recursive"},
+	createWithRefCmd: []string{"clone {repo} {dir} --single-branch --depth 1 --branch {rev} --shallow-submodules", "-C {dir} submodule update --init --recursive"},
+	createWithRevCmd: []string{"clone {repo} {dir} --shallow-submodules", "-C {dir} reset --hard {rev}", "-C {dir} submodule update --init --recursive"},
 
 	scheme:     []string{"git", "https", "http", "git+ssh", "ssh"},
 	pingCmd:    "ls-remote {scheme}://{repo}",
@@ -186,8 +190,8 @@ var vcsBzr = &vcsCmd{
 	name: "Bazaar",
 	cmd:  "bzr",
 
-	createCmd:    []string{"branch {repo} {dir}"},
-	createRevCmd: []string{"branch {repo} -r {rev} {dir}"},
+	createCmd:        []string{"branch {repo} {dir}"},
+	createWithRevCmd: []string{"branch {repo} -r {rev} {dir}"},
 
 	scheme:      []string{"https", "http", "bzr", "bzr+ssh"},
 	pingCmd:     "info {scheme}://{repo}",
@@ -241,8 +245,8 @@ var vcsSvn = &vcsCmd{
 	name: "Subversion",
 	cmd:  "svn",
 
-	createCmd:    []string{"checkout {repo} {dir}"},
-	createRevCmd: []string{"checkout {repo} -r {rev} {dir}"},
+	createCmd:        []string{"checkout {repo} {dir}"},
+	createWithRevCmd: []string{"checkout {repo} -r {rev} {dir}"},
 
 	// There is no tag command in subversion.
 	// The branch information is all in the path names.
@@ -343,22 +347,21 @@ func (v *vcsCmd) ping(scheme, repo string) error {
 
 // create creates a new copy of repo in dir.
 // The parent of dir must exist; dir must not.
-func (v *vcsCmd) create(dir, repo string) error {
-	for _, cmd := range v.createCmd {
-		if out, err := v.runOutput(".", cmd, "dir", dir, "repo", repo); err != nil {
+func (v *vcsCmd) create(dir, repo, rev string, cmds []string) error {
+	for _, cmd := range cmds {
+		if out, err := v.runOutput(".", cmd, "dir", dir, "repo", repo, "rev", rev); err != nil {
 			return fmt.Errorf("Err: %v, out: %s", err, out)
 		}
 	}
 	return nil
 }
 
-func (v *vcsCmd) createRev(dir, repo, rev string) error {
-	for _, cmd := range v.createRevCmd {
-		if out, err := v.runOutput(".", cmd, "dir", dir, "repo", repo, "rev", rev); err != nil {
-			return fmt.Errorf("Err: %v, out: %s", err, out)
-		}
+func (v *vcsCmd) isRefRev(dir, repo, rev string) bool {
+	if len(v.isRefRevCmd) == 0 {
+		return false
 	}
-	return nil
+	err := v.run(".", v.isRefRevCmd, "dir", dir, "repo", repo, "rev", rev)
+	return err == nil
 }
 
 // A vcsPath describes how to convert an import path into a
