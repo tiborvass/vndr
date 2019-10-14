@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,6 +24,7 @@ const (
 
 var (
 	verbose        bool
+	useGomod       bool
 	cleanWhitelist regexpSlice
 	strict         bool
 )
@@ -64,7 +66,9 @@ func init() {
 		fmt.Fprintf(os.Stderr, "%s [[import path] [revision]] [repository]\n%s init\n", os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 	}
+	e := os.Getenv("VNDR_GOMOD")
 	flag.BoolVar(&verbose, "verbose", false, "shows all warnings")
+	flag.BoolVar(&useGomod, "gomod", e != "" && e != "0", "use go mod for vendoring (relies on replace directive)")
 	flag.Var(&cleanWhitelist, "whitelist", "regular expressions to whitelist for cleaning phase of vendoring, relative to the vendor/ directory")
 	flag.BoolVar(&strict, "strict", false, "checking mode. treat non-trivial warning as an error")
 }
@@ -82,15 +86,15 @@ func validateArgs() {
 
 func checkUnused(deps []depEntry, vd string) {
 	for _, d := range deps {
-		if _, err := os.Stat(filepath.Join(vd, d.importPath)); err != nil && os.IsNotExist(err) {
-			Warnf("package %s is unused, consider removing it from vendor.conf", d.importPath)
+		if _, err := os.Stat(filepath.Join(vd, d.ImportPath)); err != nil && os.IsNotExist(err) {
+			Warnf("package %s is unused, consider removing it from vendor.conf", d.ImportPath)
 		}
 	}
 }
 
 func checkLicense(deps []depEntry, vd string) {
 	for _, d := range deps {
-		dir := filepath.Join(vd, d.importPath)
+		dir := filepath.Join(vd, d.ImportPath)
 		files, err := ioutil.ReadDir(dir)
 		if err != nil {
 			// err can be nil for unused package
@@ -104,17 +108,17 @@ func checkLicense(deps []depEntry, vd string) {
 			}
 		}
 		if licenseFiles == 0 && verbose {
-			log.Printf("WARNING(verbose): package %s may lack license information", d.importPath)
+			log.Printf("WARNING(verbose): package %s may lack license information", d.ImportPath)
 		}
 	}
 }
 
 func mergeDeps(root string, deps []depEntry) depEntry {
-	merged := depEntry{importPath: root}
-	merged.rev = deps[0].rev
+	merged := depEntry{ImportPath: root}
+	merged.Rev = deps[0].Rev
 	for _, d := range deps {
-		if d.repoPath != "" {
-			merged.repoPath = d.repoPath
+		if d.RepoPath != "" {
+			merged.RepoPath = d.RepoPath
 			break
 		}
 	}
@@ -140,7 +144,7 @@ func validateDeps(deps []depEntry) error {
 	roots := make(map[string][]depEntry)
 	var rootsOrder []string
 	for _, d := range deps {
-		root, err := rootImport(d.importPath)
+		root, err := rootImport(d.ImportPath)
 		if err != nil {
 			return err
 		}
@@ -155,10 +159,10 @@ func validateDeps(deps []depEntry) error {
 		rootDeps := roots[r]
 		if len(rootDeps) == 1 {
 			d := rootDeps[0]
-			if d.importPath != r {
-				Warnf("package %s is not root import, should be %s", d.importPath, r)
+			if d.ImportPath != r {
+				Warnf("package %s is not root import, should be %s", d.ImportPath, r)
 				invalid = true
-				newDeps = append(newDeps, depEntry{importPath: r, rev: d.rev, repoPath: d.repoPath})
+				newDeps = append(newDeps, depEntry{ImportPath: r, Rev: d.Rev, RepoPath: d.RepoPath})
 				continue
 			}
 			newDeps = append(newDeps, d)
@@ -167,7 +171,7 @@ func validateDeps(deps []depEntry) error {
 		invalid = true
 		var imps []string
 		for _, d := range rootDeps {
-			imps = append(imps, d.importPath)
+			imps = append(imps, d.ImportPath)
 		}
 		Warnf("packages '%s' has same root import %s", strings.Join(imps, ", "), r)
 		newDeps = append(newDeps, mergeDeps(r, rootDeps))
@@ -183,12 +187,12 @@ func validateDeps(deps []depEntry) error {
 	return errors.New("There were some validation errors")
 }
 
-func getDeps() ([]depEntry, error) {
+func getDeps(useGomod bool) ([]depEntry, error) {
 	cfg, err := os.Open(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to open config file: %v", err)
 	}
-	deps, err := parseDeps(cfg)
+	deps, err := parseDeps(cfg, useGomod)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse config: %v", err)
 	}
@@ -200,21 +204,21 @@ func getDeps() ([]depEntry, error) {
 
 func getFlagDep(cfgDeps []depEntry) (depEntry, error) {
 	dep := depEntry{
-		importPath: flag.Arg(0),
-		rev:        flag.Arg(1),
-		repoPath:   flag.Arg(2),
+		ImportPath: flag.Arg(0),
+		Rev:        flag.Arg(1),
+		RepoPath:   flag.Arg(2),
 	}
 	// if there is no revision, try to find it in config
-	if dep.rev == "" {
+	if dep.Rev == "" {
 		for _, d := range cfgDeps {
-			if d.importPath == dep.importPath {
-				dep.rev = d.rev
-				dep.repoPath = d.repoPath
+			if d.ImportPath == dep.ImportPath {
+				dep.Rev = d.Rev
+				dep.RepoPath = d.RepoPath
 				break
 			}
 		}
-		if dep.rev == "" {
-			return depEntry{}, fmt.Errorf("Failed to find %s in config file and revision was not specified", dep.importPath)
+		if dep.Rev == "" {
+			return depEntry{}, fmt.Errorf("Failed to find %s in config file and revision was not specified", dep.ImportPath)
 		}
 	}
 	return dep, nil
@@ -227,6 +231,11 @@ func main() {
 	}()
 	flag.Parse()
 	validateArgs()
+
+	if useGomod && exec.Command("go", "help", "mod").Run() != nil {
+		log.Fatal("could not detect go mod support with 'go help mod'")
+	}
+
 	gp, err := getGOPATH()
 	if err != nil {
 		log.Fatal(err)
@@ -234,8 +243,12 @@ func main() {
 	if gp == "" {
 		log.Fatal("GOPATH is not set")
 	}
+
 	var init bool
 	if flag.Arg(0) == "init" {
+		if useGomod {
+			log.Fatal("init unsupported with go mod")
+		}
 		init = true
 		_, cerr := os.Stat(configFile)
 		_, verr := os.Stat(vendorDir)
@@ -254,6 +267,13 @@ func main() {
 	}
 	vd := filepath.Join(wd, vendorDir)
 
+	if useGomod {
+		if err := gomodVndr(wd, gp, verbose); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	log.Println("Collecting initial packages")
 	initPkgs, err := collectPkgs(wd)
 	if err != nil {
@@ -262,12 +282,14 @@ func main() {
 	// variables for init
 	var dlFunc func(string) (*build.Package, error)
 	var deps []depEntry
+
 	if !init {
 		log.Println("Download dependencies")
-		cfgDeps, err := getDeps()
+		cfgDeps, err := getDeps(false /* useGomod */)
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		if len(flag.Args()) != 0 {
 			flagDep, err := getFlagDep(cfgDeps)
 			if err != nil {
@@ -284,6 +306,7 @@ func main() {
 		if err := cloneAll(vd, cfgDeps); err != nil {
 			log.Fatal(err)
 		}
+
 		deps = cfgDeps
 		log.Printf("Dependencies downloaded. Download time: %v", time.Since(startDownload))
 	} else {
@@ -297,7 +320,7 @@ func main() {
 				return nil, err
 			}
 			log.Printf("\tDownloaded %s, revision %s", imp, rev)
-			deps = append(deps, depEntry{importPath: vcs.ImportPath, rev: rev})
+			deps = append(deps, depEntry{ImportPath: vcs.ImportPath, Rev: rev})
 
 			pkg, err := ctx.Import(imp, wd, 0)
 			if _, ok := err.(*build.MultiplePackageError); ok {
